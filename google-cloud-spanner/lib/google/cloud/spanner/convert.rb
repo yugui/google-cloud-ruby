@@ -39,7 +39,11 @@ module Google
               [Google::Protobuf::Value.new(null_value: :NULL_VALUE),
                Google::Spanner::V1::Type.new(code: :INT64)]
             elsif String === obj
-              [raw_to_value(obj), Google::Spanner::V1::Type.new(code: :STRING)]
+              if obj.encoding == Encoding::BINARY
+                [raw_to_value(obj), Google::Spanner::V1::Type.new(code: :BYTES)]
+              else
+                [raw_to_value(obj), Google::Spanner::V1::Type.new(code: :STRING)]
+              end
             elsif Symbol === obj
               [raw_to_value(obj.to_s),
                Google::Spanner::V1::Type.new(code: :STRING)]
@@ -97,7 +101,15 @@ module Google
             if NilClass === obj
               Google::Protobuf::Value.new null_value: :NULL_VALUE
             elsif String === obj
-              Google::Protobuf::Value.new string_value: obj
+              case obj.encoding
+              when Encoding::UTF_8
+                Google::Protobuf::Value.new string_value: obj
+              when Encoding::BINARY
+                encoded = Base64.strict_encode64(obj)
+                Google::Protobuf::Value.new(bytes_value: encoded)
+              else
+                Google::Protobuf::Value.new string_value: obj.encode(Encoding::UTF_8)
+              end
             elsif Symbol === obj
               Google::Protobuf::Value.new string_value: obj.to_s
             elsif TrueClass === obj
@@ -131,7 +143,7 @@ module Google
                   Hash[obj.map { |k, v| [String(k), raw_to_value(v)] }])
             elsif obj.respond_to?(:read) && obj.respond_to?(:rewind)
               obj.rewind
-              content = obj.read.force_encoding("ASCII-8BIT")
+              content = obj.read.force_encoding(Encoding::UTF_8)
               encoded_content = Base64.strict_encode64(content)
               Google::Protobuf::Value.new(string_value: encoded_content)
             else
@@ -175,7 +187,7 @@ module Google
             when :STRING
               value.string_value
             when :BYTES
-              StringIO.new Base64.decode64 value.string_value
+              Base64.decode64 value.string_value
             when :ARRAY
               value.list_value.values.map do |v|
                 value_to_raw v, type.array_element_type

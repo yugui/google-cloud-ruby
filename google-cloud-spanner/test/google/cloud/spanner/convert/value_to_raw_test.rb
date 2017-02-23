@@ -76,19 +76,12 @@ describe Google::Cloud::Spanner::Convert, :value_to_raw, :mock_spanner do
     raw.must_equal Date.parse("2017-01-02")
   end
 
-  it "converts a STRING value" do
-    value = Google::Protobuf::Value.new(string_value: "Charlie")
-    type = Google::Spanner::V1::Type.new(code: :STRING)
-    raw = Google::Cloud::Spanner::Convert.value_to_raw value, type
-    raw.must_equal "Charlie"
-  end
-
   it "converts a BYTES value" do
     value = Google::Protobuf::Value.new(string_value: Base64.encode64("contents"))
     type = Google::Spanner::V1::Type.new(code: :BYTES)
     raw = Google::Cloud::Spanner::Convert.value_to_raw value, type
-    raw.must_be_kind_of StringIO
-    raw.read.must_equal "contents"
+    raw.must_be_kind_of String
+    raw.must_equal "contents".force_encoding(Encoding::BINARY)
   end
 
   it "converts an ARRAY of INT64 values" do

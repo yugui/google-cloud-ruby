@@ -92,6 +92,15 @@ describe Google::Cloud::Spanner::Convert, :raw_to_params, :mock_spanner do
                                             Google::Spanner::V1::Type.new(code: :STRING)] })
   end
 
+  it "converts a byte sequence" do
+    seq = "\x00\x01\x02\x03\x04\x05".force_encoding(Encoding::BINARY)
+    encoded = Base64.strict_encode64(seq)
+
+    combined_params = Google::Cloud::Spanner::Convert.raw_to_params tx_id: seq
+    combined_params.must_equal({ "name" => [Google::Protobuf::Value.new(bytes_value: encoded),
+                                            Google::Spanner::V1::Type.new(code: :BYTES)] })
+  end
+
   it "converts a IO-ish value" do
     file = StringIO.new "contents"
 
