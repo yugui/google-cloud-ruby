@@ -114,6 +114,10 @@ module Google
 
         # rubocop:enable all
 
+        def transaction
+          @metadata.transaction
+        end
+
         ##
         # Whether the returned data is streaming from the Spanner API.
         # @return [Boolean]

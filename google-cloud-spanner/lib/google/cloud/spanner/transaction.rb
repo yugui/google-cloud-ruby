@@ -12,115 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-require "google/cloud/spanner/results"
-require "google/cloud/spanner/commit"
-require "google/cloud/spanner/transaction"
+require 'forwardable'
 
 module Google
   module Cloud
     module Spanner
-      ##
-      # # Session
-      #
-      # ...
-      #
-      # See {Google::Cloud#spanner}
-      #
-      # @example
-      #   require "google/cloud"
-      #
-      #   gcloud = Google::Cloud.new
-      #   spanner = gcloud.spanner
-      #
-      #   # ...
-      class Session
-        ##
-        # @private The gRPC Service object.
-        attr_accessor :service
-
-        # @private Creates a new Session instance.
-        def initialize grpc, service
-          @grpc = grpc
-          @service = service
-          @transaction = NullTransaction.new service, self
-        end
-
-        # The unique identifier for the project.
-        # @return [String]
-        def project_id
-          V1::SpannerClient.match_project_from_session_name @grpc.name
-        end
-
-        # The unique identifier for the instance.
-        # @return [String]
-        def instance_id
-          V1::SpannerClient.match_instance_from_session_name @grpc.name
-        end
-
-        # The unique identifier for the database.
-        # @return [String]
-        def database_id
-          V1::SpannerClient.match_database_from_session_name @grpc.name
-        end
-
-        # The unique identifier for the session.
-        # @return [String]
-        def session_id
-          V1::SpannerClient.match_session_from_session_name @grpc.name
-        end
-
-        # rubocop:disable LineLength
-
-        ##
-        # The full path for the session resource. Values are of the form
-        # `projects/<project_id>/instances/<instance_id>/databases/<database_id>/sessions/<session_id>`.
-        # @return [String]
-        def path
-          @grpc.name
-        end
-
-        # rubocop:enable LineLength
-
-        ##
-        # Reloads the session resource. Useful for determining if the session is
-        # still valid on the Spanner API.
-        #
-        # @example
-        #   require "google/cloud/spanner"
-        #
-        #   spanner = Google::Cloud::Spanner.new
-        #
-        #   db = spanner.session "my-instance", "my-database"
-        #
-        #   db.reload! # API call
-        #
-        def reload!
-          ensure_service!
-          @grpc = service.get_session path
-          self
-        end
-
-        ##
-        # Permanently deletes the session.
-        #
-        # @return [Boolean] Returns `true` if the session was deleted.
-        #
-        # @example
-        #   require "google/cloud/spanner"
-        #
-        #   spanner = Google::Cloud::Spanner.new
-        #
-        #   db = spanner.session "my-instance", "my-database"
-        #
-        #   db.delete_session
-        #
-        def delete_session
-          ensure_service!
-          service.delete_session path
-          true
-        end
-
+      module TransactionReadable
         ##
         # Executes a SQL query.
         #
@@ -206,7 +103,22 @@ module Google
         #   puts "User #{user_row[:id]} is #{user_row[:name]}""
         #
         def execute sql, params: nil, streaming: true
-          @transaction.execute sql, params: params, streaming: streaming
+          ensure_service!
+          if streaming
+            results = Results.from_enum service.streaming_execute_sql \
+              session.path, sql, params: params, transaction: self
+          else
+            results = Results.from_grpc service.execute_sql \
+              session.path, sql, params: params, transaction: self
+          end
+
+          tx = results.transaction
+          if tx
+            @transaction_id = tx.id
+            @read_timestamp = tx.read_timestamp
+          end
+
+          results
         end
         alias_method :query, :execute
 
@@ -257,27 +169,26 @@ module Google
         #   end
         #
         def read table, columns, id: nil, limit: nil, streaming: true
-          @transaction.read table, columns, id: id, limit: limit,
-                                            streaming: streaming
-        end
-
-        def transaction type, *params
-          tx = case type
-               when :strong, :read_timestamp, :exact_staleness
-                 ReadOnlyTransaction.send(type, service, self, *params)
-               when :read_write
-                 ReadWriteTransaction.new(*params, service, self, *params)
-               else
-                 raise ArgumentError, "unknown type of transaction #{type}"
-               end
-
-          if block_given?
-            yield tx
+          ensure_service!
+          if streaming
+            results = Results.from_enum service.streaming_read_table \
+              session.path, table, columns, id: id, limit: limit, transaction: self
           else
-            tx
+            results = Results.from_grpc service.read_table \
+              session.path, table, columns, id: id, limit: limit, transaction: self
           end
-        end
 
+          tx = results.transaction
+          if tx
+            @transaction_id = tx.id
+            @read_timestamp = tx.read_timestamp
+          end
+
+          results
+        end
+      end
+
+      module TransactionWritable
         # Creates changes to be applied to rows in the database.
         #
         # @yield [commit] The block for updating the data.
@@ -296,9 +207,9 @@ module Google
         #   end
         #
         def commit
-          @transaction.commit do |commit|
-            yield commit
-          end
+          commit = Commit.new
+          yield commit
+          service.commit session.path, commit.mutations, transaction: self
         end
 
         ##
@@ -336,7 +247,9 @@ module Google
         #                       { id: 2, name: "Harvey",  active: true }]
         #
         def upsert table, *rows
-          @transaction.upsert table, *rows
+          commit = Commit.new
+          commit.upsert table, rows
+          service.commit session.path, commit.mutations, transaction: self
         end
         alias_method :save, :upsert
 
@@ -374,7 +287,9 @@ module Google
         #                       { id: 2, name: "Harvey",  active: true }]
         #
         def insert table, *rows
-          @transaction.insert table, *rows
+          commit = Commit.new
+          commit.insert table, rows
+          service.commit session.path, commit.mutations, transaction: self
         end
 
         ##
@@ -411,7 +326,9 @@ module Google
         #                       { id: 2, name: "Harvey",  active: true }]
         #
         def update table, *rows
-          @transaction.update table, *rows
+          commit = Commit.new
+          commit.update table, rows
+          service.commit session.path, commit.mutations, transaction: self
         end
 
         ##
@@ -450,7 +367,9 @@ module Google
         #                        { id: 2, name: "Harvey",  active: true }]
         #
         def replace table, *rows
-          @transaction.replace table, *rows
+          commit = Commit.new
+          commit.replace table, rows
+          service.commit session.path, commit.mutations, transaction: self
         end
 
         ##
@@ -472,18 +391,52 @@ module Google
         #   db.delete "users", [1, 2, 3]
         #
         def delete table, *id
-          @transaction.delete table, *id
+          commit = Commit.new
+          commit.delete table, id
+          service.commit session.path, commit.mutations, transaction: self
         end
 
         def rollback
-          @transaction.rollback
+          service.rollback self
+        end
+      end
+
+      module TransactionResumable
+      end
+
+      class AbstractTransaction
+        extend Forwardable
+
+        def initialize(service, session, options)
+          @service = service
+          @session = session
+          @options = options
         end
 
+        attr_reader :service, :session, :transaction_id, :read_timestamp, :options
+        def_delegators :@session, :project_id, :instance_id, :database_id, :session_id
+
         ##
-        # @private Creates a new Session instance from a
-        # Google::Spanner::V1::Session.
-        def self.from_grpc grpc, service
-          new grpc, service
+        # @private Converts a Transaction instance into a
+        # Google::Spanner::V1::TransactionSelector.
+        def to_selector
+          raise NotImplementedError, "to be implemented in subclasses"
+        end
+
+        class << self
+          ##
+          # @private Creates a new (Abstract)Transaction instance from a
+          # Google::Spanner::V1::Transaction
+          alias from_grpc new
+        end
+
+        def to_selector
+          tx_id = transaction_id
+          if tx_id
+            Google::Spanner::V1::TransactionSelector.new(id: tx_id)
+          else
+            Google::Spanner::V1::TransactionSelector.new(begin: options)
+          end
         end
 
         protected
@@ -493,6 +446,86 @@ module Google
         # available.
         def ensure_service!
           fail "Must have active connection to service" unless service
+        end
+      end
+
+      class NullTransaction < AbstractTransaction
+        include TransactionReadable
+        include TransactionWritable
+
+        def initialize service, session
+          super service, session, nil
+        end
+
+        def to_selector
+          nil
+        end
+
+        def transaction_id
+          nil
+        end
+      end
+
+      ##
+      # # ReadOnlyTransaction
+      #
+      # ...
+      #
+      # See {Google::Cloud#spanner}
+      #
+      class ReadOnlyTransaction < AbstractTransaction
+        include TransactionReadable
+
+        def initialize(service, session, opts)
+          read_only =
+            Google::Spanner::V1::TransactionOptions::ReadOnly.new(opts)
+          super service, session, Google::Spanner::V1::TransactionOptions.new(
+            read_only: read_only)
+        end
+
+        class << self
+          def strong service, session
+            new service, session, strong: true
+          end
+
+          def read_timestamp service, session, timestamp
+            timestamp = Google::Protobuf::Timestamp.new.tap do |value|
+              value.from_time(timestamp.to_time)
+            end
+            new service, session, read_timestamp: timestamp
+          end
+          alias at read_timestamp
+
+          def exact_staleness service, session, seconds, nanos = nil
+            new service, session, 
+              exact_staleness: Google::Protobuf::Duration.new(
+                seconds: seconds, nanos: nanos)
+          end
+          alias before exact_staleness
+        end
+      end
+
+      class SingleUseTransaction < ReadOnlyTransaction
+        def to_selector
+          Google::Spanner::V1::TransactionSelector.new(single_use: options)
+        end
+      end
+
+      ##
+      # # ReadWriteTransaction
+      #
+      # ...
+      #
+      # See {Google::Cloud#spanner}
+      #
+      class ReadWriteTransaction < AbstractTransaction
+        include TransactionReadable
+        include TransactionWritable
+
+        def initialize service, session
+          opt = Google::Spanner::V1::TransactionOptions.new(
+            read_write: Google::Spanner::V1::TransactionOptions::ReadWrite.new)
+          super service, session, opt
         end
       end
     end
